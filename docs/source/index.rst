@@ -18,11 +18,12 @@ Table of Contents
    topic/what_is_redislite
    topic/redislite_design
    topic/using_with_existing_modules
+   topic/using
    topic/redislite_module
    topic/command_line
 
    topic/contributing
-   topic/new_contributors
+
 
 Indices and tables
 ******************

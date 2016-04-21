@@ -14,23 +14,32 @@ import atexit
 import json
 import logging
 import os
+import psutil
 import redis
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
+import sys
 from . import configuration
+from . import __redis_executable__
 
 
 logger = logging.getLogger(__name__)
 
 
 class RedisLiteException(Exception):
+    """
+    Redislite Client Error exception class
+    """
     pass
 
 
 class RedisLiteServerStartError(Exception):
+    """
+    Redislite redis-server start error
+    """
     pass
 
 
@@ -50,42 +59,72 @@ class RedisMixin(object):
     dbdir = None
     settingregistryfile = None
     cleanupregistry = False
+    redis_configuration = None
+    redis_configuration_filename = None
 
-    def _cleanup(self):
+    def _cleanup(self, sys_modules=None):
         """
         Stop the redis-server for this instance if it's running
         :return:
         """
+        if sys_modules:
+            import sys
+            sys.modules.update(sys_modules)
 
-        if not self.redis_dir:
-            return
+        if self.pid:
+            logger.debug('Connection count: %s', self._connection_count())
+            if self._connection_count() <= 1:
+                logger.debug(
+                    'Last client using the connection, shutting down the redis '
+                    'connection on socket: %s',
+                    self.socket_file
+                )
+                # noinspection PyUnresolvedReferences
+                logger.debug(
+                    'Shutting down redis server with pid of %d', self.pid
+                )
+                self.shutdown()
+                self.socket_file = None
 
-        if self.running:
-            logger.debug(
-                'Shutting down the redis connection on socket: %s',
-                self.socket_file
-            )
-            # noinspection PyUnresolvedReferences
-            logger.debug(
-                'Shutting down redis server with pid of %d' % self.pid)
-            self.shutdown()
-            self.socket_file = None
+                if self.pidfile and os.path.exists(self.pidfile):   # pragma: no cover
+                    # noinspection PyTypeChecker
+                    pid = int(open(self.pidfile).read())
+                    os.kill(pid, signal.SIGKILL)
 
-        if self.pidfile and os.path.exists(self.pidfile):   # pragma: no cover
-            # noinspection PyTypeChecker
-            pid = int(open(self.pidfile).read())
-            os.kill(pid, signal.SIGKILL)
+                if self.redis_dir and os.path.isdir(self.redis_dir):  # pragma: no cover
+                    shutil.rmtree(self.redis_dir)
 
-        if os.path.isdir(self.redis_dir):  # pragma: no cover
-            shutil.rmtree(self.redis_dir)
-
-        if self.cleanupregistry and os.path.exists(self.settingregistryfile):
-            os.remove(self.settingregistryfile)
-            self.settingregistryfile = None
+                if self.cleanupregistry and os.path.exists(
+                        self.settingregistryfile
+                ):
+                    os.remove(self.settingregistryfile)
+                    self.settingregistryfile = None
+            else:
+                logger.debug(
+                    'Other clients are still connected to the redis server, '
+                    'not shutting down the connection on socket: %s',
+                    self.socket_file
+                )
+                self.connection_pool.disconnect()
 
         self.running = False
         self.redis_dir = None
         self.pidfile = None
+
+    def _connection_count(self):
+        """
+        Return the number of active connections to the redis server.
+        :return:
+        """
+        if not self._is_redis_running():  # pragma: no cover
+            return 0
+        active_connections = 0
+        for client in self.client_list():
+            flags = client.get('flags', '')
+            flags = flags.upper()
+            if 'U' in flags or 'N' in flags:
+                active_connections += 1
+        return active_connections
 
     def _create_redis_directory_tree(self):
         """
@@ -98,31 +137,47 @@ class RedisMixin(object):
                 'Creating temporary redis directory %s', self.redis_dir
             )
             self.pidfile = os.path.join(self.redis_dir, 'redis.pid')
-            self.socket_file = os.path.join(self.redis_dir, 'redis.socket')
+            self.logfile = os.path.join(self.redis_dir, 'redis.log')
+            if not self.socket_file:
+                self.socket_file = os.path.join(self.redis_dir, 'redis.socket')
 
     def _start_redis(self):
         """
         Start the redis server
         :return:
         """
-        config_file = os.path.join(self.redis_dir, 'redis.config')
 
-        # Write a redis.config to our temp directory
-        fh = open(config_file, 'w')
-        fh.write(
-            configuration.config(
-                pidfile=self.pidfile,
-                unixsocket=self.socket_file,
-                dbdir=self.dbdir,
-                dbfilename=self.dbfilename
-            )
+        self.redis_configuration_filename = os.path.join(
+            self.redis_dir, 'redis.config'
         )
-        fh.close()
 
-        command = ['redis-server', config_file]
+        kwargs = dict(self.server_config)
+        kwargs.update(
+            {
+                'pidfile': self.pidfile,
+                'logfile': kwargs.get('logfile', self.logfile),
+                'unixsocket': self.socket_file,
+                'dbdir': self.dbdir,
+                'dbfilename': self.dbfilename
+            }
+        )
+        # Write a redis.config to our temp directory
+        self.redis_configuration = configuration.config(**kwargs)
+        with open(self.redis_configuration_filename, 'w') as file_handle:
+            file_handle.write(self.redis_configuration)
+
+        redis_executable = __redis_executable__
+        if not redis_executable:  # pragma: no cover
+            redis_executable = 'redis-server'
+        command = [redis_executable, self.redis_configuration_filename]
         logger.debug('Running: %s', ' '.join(command))
         rc = subprocess.call(command)
         if rc:  # pragma: no cover
+            logger.debug('The binary redis-server failed to start')
+            redis_log = os.path.join(self.redis_dir, 'redis.log')
+            if os.path.exists(redis_log):
+                with open(redis_log) as file_handle:
+                    logger.debug(file_handle.read())
             raise RedisLiteException('The binary redis-server failed to start')
 
         # Wait for Redis to start
@@ -153,11 +208,24 @@ class RedisMixin(object):
             return False
 
         if os.path.exists(self.settingregistryfile):
-            with open(self.settingregistryfile) as fh:
-                settings = json.load(fh)
-            with open(settings['pidfile']) as fh:
-                pid = fh.read().strip()   # NOQA
+            with open(self.settingregistryfile) as file_handle:
+                settings = json.load(file_handle)
 
+            if not os.path.exists(settings['pidfile']):
+                return False
+
+            with open(settings['pidfile']) as file_handle:
+                pid = file_handle.read().strip()   # NOQA
+                pid = int(pid)
+                if pid:  # pragma: no cover
+                    try:
+                        process = psutil.Process(pid)
+                    except psutil.NoSuchProcess:
+                        return False
+                    if not process.is_running():
+                        return False
+                else:  # pragma: no cover
+                    return False
             return True
         return False
 
@@ -184,6 +252,20 @@ class RedisMixin(object):
         """
         with open(self.settingregistryfile) as fh:
             settings = json.load(fh)
+        logger.debug('loading settings, found: %s', settings)
+        pidfile = settings.get('pidfile', '')
+        if os.path.exists(pidfile):
+            pid_number = 0
+            with open(pidfile) as fh:
+                pid_number = int(fh.read())
+            if pid_number:
+                process = psutil.Process(pid_number)
+                if not process.is_running():  # pragma: no cover
+                    logger.warn('Loaded registry for non-existant redis-server')
+                    return
+        else:  # pragma: no cover
+            logger.warn('No pidfile found')
+            return
         self.pidfile = settings['pidfile']
         self.socket_file = settings['unixsocket']
         self.dbdir = settings['dbdir']
@@ -200,8 +282,11 @@ class RedisMixin(object):
         # If the user is specifying settings we can't configure just pass the
         # request to the redis.Redis module
         if 'host' in kwargs.keys() or 'port' in kwargs.keys():
-            # noinspection PyArgumentList,PyPep8
-            super(RedisMixin, self).__init__(*args, **kwargs)  # pragma: no cover
+            return super(RedisMixin, self).__init__(*args, **kwargs)  # pragma: no cover
+
+        self.socket_file = kwargs.get('unix_socket_path', None)
+        if self.socket_file and self.socket_file == os.path.basename(self.socket_file):
+            self.socket_file = os.path.join(os.getcwd(), self.socket_file)
 
         db_filename = None
         if args:
@@ -216,6 +301,11 @@ class RedisMixin(object):
             # Remove our keyword argument
             del kwargs['dbfilename']
 
+        self.server_config = kwargs.pop('serverconfig', {})
+
+        if db_filename and db_filename == os.path.basename(db_filename):
+            db_filename = os.path.join(os.getcwd(), db_filename)
+
         if db_filename:
             self.dbfilename = os.path.basename(db_filename)
             self.dbdir = os.path.dirname(db_filename)
@@ -223,10 +313,15 @@ class RedisMixin(object):
             self.settingregistryfile = os.path.join(
                 self.dbdir, self.dbfilename + '.settings'
             )
-            # Remove the argument before we pass it to the redis class
 
-        if self._is_redis_running():
+        logger.debug('Setting up redis with rdb file: %s', self.dbfilename)
+        logger.debug('Setting up redis with socket file: %s', self.socket_file)
+        atexit.register(self._cleanup, sys.modules.copy())
+        if self._is_redis_running() and not self.socket_file:
             self._load_setting_registry()
+            logger.debug(
+                'Socket file after registry load: %s', self.socket_file
+            )
         else:
             self._create_redis_directory_tree()
 
@@ -236,16 +331,18 @@ class RedisMixin(object):
                     self.dbdir, self.dbfilename + '.settings'
                 )
 
-            atexit.register(self._cleanup)
-
             self._start_redis()
 
         kwargs['unix_socket_path'] = self.socket_file
         # noinspection PyArgumentList
+        logger.debug('Calling binding with %s, %s', args, kwargs)
         super(RedisMixin, self).__init__(*args, **kwargs)  # pragma: no cover
 
+        logger.debug("Pinging the server to ensure we're connected")
+        self.ping()
+
     def __del__(self):
-        self._cleanup()
+        self._cleanup()  # pragma: no cover
 
     @property
     def db(self):
@@ -258,11 +355,29 @@ class RedisMixin(object):
 
     @property
     def pid(self):
-        if self.pidfile:
-            with open(self.pidfile) as fh:
-                pid = fh.read().strip()
+        """
+        Get the current redis-server process id.
+
+        Returns:
+            pid(int):
+                The process id of the redis-server process associated with this
+                redislite instance or None.  If the redis-server is not
+                running.
+        """
+        if self.pidfile and os.path.exists(self.pidfile):
+            with open(self.pidfile) as file_handle:
+                pid = int(file_handle.read().strip())
+                if pid:  # pragma: no cover
+                    try:
+                        process = psutil.Process(pid)
+                    except psutil.NoSuchProcess:
+                        return 0
+                    if not process.is_running():
+                        return 0
+                else:  # pragma: no cover
+                    return 0
             return int(pid)
-        return None  # pragma: no cover
+        return 0  # pragma: no cover
 
 
 class Redis(RedisMixin, redis.Redis):
@@ -303,6 +418,47 @@ class Redis(RedisMixin, redis.Redis):
         port(int): The port number of the redis server to connect to.  If this
             argument is not None, the embedded redis server will not be used.
             Defaults to None.
+
+        serverconfig(dict): A dictionary of additional redis-server
+            configuration settings.  All keys and values must be str.
+            Supported keys are:
+                activerehashing,
+                aof_rewrite_incremental_fsync,
+                appendfilename,
+                appendfsync,
+                appendonly,
+                auto_aof_rewrite_min_size,
+                auto_aof_rewrite_percentage,
+                aof_load_truncated,
+                databases,
+                hash_max_ziplist_entries,
+                hash_max_ziplist_value,
+                hll_sparse_max_bytes,
+                hz,
+                latency_monitor_threshold,
+                list_max_ziplist_entries,
+                list_max_ziplist_value,
+                logfile,
+                loglevel,
+                lua_time_limit,
+                no_appendfsync_on_rewrite,
+                notify_keyspace_events,
+                port,
+                rdbchecksum,
+                rdbcompression,
+                repl_disable_tcp_nodelay,
+                slave_read_only,
+                slave_serve_stale_data,
+                stop_writes_on_bgsave_error,
+                tcp_backlog,
+                tcp_keepalive,
+                unixsocket,
+                unixsocketperm,
+                slave_priority,
+                timeout,
+                set_max_intset_entries,
+                zset_max_ziplist_entries,
+                zset_max_ziplist_value
 
     Returns:
         A :class:`redis.Redis()` class object if the host or port arguments
@@ -367,6 +523,47 @@ class StrictRedis(RedisMixin, redis.StrictRedis):
             port number of the redis server to connect to.  If this argument is
             not None, the embedded redis server will not be used.  Defaults to
             None.
+
+        serverconfig(dict): A dictionary of additional redis-server
+            configuration settings.  All keys and values must be str.
+            Supported keys are:
+                activerehashing,
+                aof_rewrite_incremental_fsync,
+                appendfilename,
+                appendfsync,
+                appendonly,
+                auto_aof_rewrite_min_size,
+                auto_aof_rewrite_percentage,
+                aof_load_truncated,
+                databases,
+                hash_max_ziplist_entries,
+                hash_max_ziplist_value,
+                hll_sparse_max_bytes,
+                hz,
+                latency_monitor_threshold,
+                list_max_ziplist_entries,
+                list_max_ziplist_value,
+                logfile,
+                loglevel,
+                lua_time_limit,
+                no_appendfsync_on_rewrite,
+                notify_keyspace_events,
+                port,
+                rdbchecksum,
+                rdbcompression,
+                repl_disable_tcp_nodelay,
+                slave_read_only,
+                slave_serve_stale_data,
+                stop_writes_on_bgsave_error,
+                tcp_backlog,
+                tcp_keepalive,
+                unixsocket,
+                unixsocketperm,
+                slave_priority,
+                timeout,
+                set_max_intset_entries,
+                zset_max_ziplist_entries,
+                zset_max_ziplist_value
 
     Returns:
         A :class:`redis.StrictRedis()` class object if the host or port
