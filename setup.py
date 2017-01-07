@@ -297,7 +297,7 @@ if __name__ == '__main__':
         )
         del args['ext_modules']
         del args['cmdclass']
-        add_redis_metadata(WINDOWS_REDIS_SERVER, METADATA_FILENAME)
+        add_redis_metadata(server_filename=WINDOWS_REDIS_SERVER, metadata_filename=METADATA_FILENAME)
     else:
         if sys.platform in UNSUPPORTED_PLATFORMS:
             print(
