@@ -15,9 +15,12 @@ import sys
 from subprocess import call
 
 
-logger = logging.getLogger(__name__)
+LOG = logging.getLogger('setup')
+
 
 UNSUPPORTED_PLATFORMS = ['win32', 'win64']
+UNSUPPORTED_PLATFORMS = []
+WINDOWS_REDIS_SERVER = '/Program Files/Redis/redis-server.exe'
 METADATA_FILENAME = 'redislite/package_metadata.json'
 BASEPATH = os.path.dirname(os.path.abspath(__file__))
 REDIS_PATH = os.path.join(BASEPATH, 'redis.submodule')
@@ -38,7 +41,7 @@ class BuildRedis(build):
         build.run(self)
 
         # build Redis
-        logger.debug('Running build_redis')
+        LOG.debug('Running build_redis')
 
         os.environ['CC'] = 'gcc'
         os.environ['PREFIX'] = REDIS_PATH
@@ -57,10 +60,8 @@ class BuildRedis(build):
         ]
 
         def _compile():
-            print('*' * 80)
-            print(os.getcwd())
+            LOG.debug('Running compile in %r', os.getcwd())
             call(cmd, cwd=REDIS_PATH)
-            print('*' * 80)
 
         self.execute(_compile, [], 'compiling redis')
 
@@ -69,8 +70,40 @@ class BuildRedis(build):
 
         if not self.dry_run:
             for target in target_files:
-                logger.debug('copy: %s -> %s', target, self.build_scripts)
+                LOG.debug('copy: %s -> %s', target, self.build_scripts)
                 self.copy_file(target, self.build_scripts)
+
+
+def add_redis_metadata(server_filename, metadata_filename):
+    """
+    Add the redis server metadata to the metadata file
+
+    Parameters
+    ----------
+    server_filename : str
+        The filename of the redis server
+
+    metadata_filename : str
+        The filename of the metadata file
+    """
+    if not os.path.exists(server_filename) or not os.path.exists(metadata_filename):
+        return
+
+    with open(metadata_filename) as fh:
+        metadata = json.load(fh)
+        metadata['redis_bin'] = server_filename
+
+    # Store the redis-server --version output for later
+    for line in os.popen('%s --version' % metadata['redis_bin']).readlines():
+        line = line.strip()
+        for item in line.split():
+            if '=' in item:
+                key, value = item.split('=')
+                REDIS_SERVER_METADATA[key] = value
+    metadata['redis_server'] = REDIS_SERVER_METADATA
+    LOG.debug('new metadata: %s', metadata)
+    with open(metadata_filename, 'w') as metadata_handle:
+        json.dump(metadata, metadata_handle, indent=4)
 
 
 class InstallRedis(install):
@@ -89,7 +122,7 @@ class InstallRedis(install):
         install.run(self)
 
         # install Redis executables
-        logger.debug(
+        LOG.debug(
             'running InstallRedis %s -> %s', self.build_lib, self.install_lib
         )
         self.copy_tree(self.build_lib, self.install_lib)
@@ -97,37 +130,21 @@ class InstallRedis(install):
         if not os.path.exists(module_bin):
             os.makedirs(module_bin, 0o0755)
         self.copy_tree(self.build_scripts, module_bin)
-        logger.debug(
+        LOG.debug(
             'running InstallRedis %s -> %s',
             self.build_scripts, self.install_scripts
         )
         self.copy_tree(self.build_scripts, self.install_scripts)
 
         install_scripts = self.install_scripts
-        print('install_scripts: %s' % install_scripts)
+        LOG.debug('install_scripts: %s', install_scripts)
         md_file = os.path.join(
             self.install_lib, 'redislite/package_metadata.json'
         )
-        if os.path.exists(md_file):
-            with open(md_file) as fh:
-                md = json.load(fh)
-                if os.path.exists(os.path.join(module_bin, 'redis-server')):
-                    md['redis_bin'] = os.path.join(module_bin, 'redis-server')
-                else:
-                    md['redis_bin'] = os.path.join(
-                        install_scripts, 'redis-server'
-                    )
-            # Store the redis-server --version output for later
-            for line in os.popen('%s --version' % md['redis_bin']).readlines():
-                line = line.strip()
-                for item in line.split():
-                    if '=' in item:
-                        key, value = item.split('=')
-                        REDIS_SERVER_METADATA[key] = value
-            md['redis_server'] = REDIS_SERVER_METADATA
-            print('new metadata: %s' % md)
-            with open(md_file, 'w') as fh:
-                json.dump(md, fh, indent=4)
+        server_filename = os.path.join(module_bin, 'redis-server')
+        if not os.path.exists(server_filename):
+            server_filename = os.path.join(install_scripts, 'redis-server')
+        add_redis_metadata(server_filename=server_filename, metadata_filename=md_file)
 
 # Create a dictionary of our arguments, this way this script can be imported
 #  without running setup() to allow external scripts to see the setup settings.
@@ -179,7 +196,12 @@ args = {
     # We put in a bogus extension module so wheel knows this package has
     # compiled components.
     'ext_modules': [
-        Extension('dummy', sources=['src/dummy.c'])
+        Extension(
+            'dummy',
+            sources=[
+                'src/dummy.c'
+            ]
+        )
     ],
     # 'extras_require': {
     #     ':sys_platform=="darwin"': [],
@@ -270,21 +292,25 @@ def get_and_update_metadata():
 
 
 if __name__ == '__main__':
-    if sys.platform in UNSUPPORTED_PLATFORMS:
-        print(
-            'The redislite module is not supported on the %r '
-            'platform' % sys.platform,
-            file=sys.stderr
+    if sys.platform in ['win32'] and os.path.exists(WINDOWS_REDIS_SERVER):
+        LOG.debug(
+            'Using binary redis server at %s' % WINDOWS_REDIS_SERVER
         )
-        sys.exit(1)
-
-    os.environ['CC'] = 'gcc'
-
-    logging.basicConfig(level=logging.INFO)
-
-    logger.debug('Building for platform: %s', distutils.util.get_platform())
+        del args['ext_modules']
+        del args['cmdclass']
+        add_redis_metadata(WINDOWS_REDIS_SERVER, METADATA_FILENAME)
+    else:
+        if sys.platform in UNSUPPORTED_PLATFORMS:
+            print(
+                'The redislite module is not supported on the %r '
+                'platform' % sys.platform,
+                file=sys.stderr
+            )
+            sys.exit(1)
+        os.environ['CC'] = 'gcc'
+        logging.basicConfig(level=logging.DEBUG)
+        LOG.debug('Building for platform: %s', distutils.util.get_platform())
 
     metadata = get_and_update_metadata()
     setup_arguments['version'] = metadata['version']
-
     setup(**setup_arguments)
