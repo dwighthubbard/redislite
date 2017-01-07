@@ -85,12 +85,16 @@ def add_redis_metadata(server_filename, metadata_filename):
         The filename of the metadata file
     """
     global REDIS_SERVER_METADATA
-    if not os.path.exists(server_filename) or not os.path.exists(metadata_filename):
+    if not os.path.exists(server_filename):
+        LOG.debug('redis-server %r does not exist', server_filename)
         return
 
-    with open(metadata_filename) as fh:
-        metadata = json.load(fh)
-        metadata['redis_bin'] = server_filename
+    metadata = {}
+    if os.path.exists(metadata_filename):
+        with open(metadata_filename) as fh:
+            metadata = json.load(fh)
+
+    metadata['redis_bin'] = server_filename
 
     # Store the redis-server --version output for later
     for line in os.popen('"%s" --version' % metadata['redis_bin']).readlines():
