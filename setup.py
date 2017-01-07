@@ -14,10 +14,8 @@ import distutils.util
 import sys
 from subprocess import call
 
-
+logging.basicConfig(level=logging.DEBUG)
 LOG = logging.getLogger('setup')
-
-
 UNSUPPORTED_PLATFORMS = ['win32', 'win64']
 UNSUPPORTED_PLATFORMS = []
 WINDOWS_REDIS_SERVER = '/Program Files/Redis/redis-server.exe'
@@ -86,6 +84,7 @@ def add_redis_metadata(server_filename, metadata_filename):
     metadata_filename : str
         The filename of the metadata file
     """
+    global REDIS_SERVER_METADATA
     if not os.path.exists(server_filename) or not os.path.exists(metadata_filename):
         return
 
@@ -292,7 +291,6 @@ def get_and_update_metadata():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
     if sys.platform in ['win32'] and os.path.exists(WINDOWS_REDIS_SERVER):
         LOG.debug(
             'Using binary redis server at %s' % WINDOWS_REDIS_SERVER
