@@ -5,11 +5,12 @@
 This module contains functions to generate a redis configuration from a
 configuration template.
 """
-import logging
 from copy import copy
+import logging
+import sys
 
 
-logger = logging.getLogger(__name__)  # pylint: disable=C0103
+LOG = logging.getLogger(__name__)
 
 
 DEFAULT_REDIS_SETTINGS = {
@@ -83,6 +84,9 @@ def settings(**kwargs):
         the setting will be repeated with each specified value.
     """
     new_settings = copy(DEFAULT_REDIS_SETTINGS)
+    if sys.platform in ['win32']:
+        # Remove settings that are missing on Windows
+        del new_settings['unixsocketperm']
     new_settings.update(kwargs)
 
     return new_settings
@@ -118,5 +122,5 @@ def config(**kwargs):
                 )
         else:
             del config_dict[key]
-    logger.debug('Using configuration: %s', configuration)
+    LOG.debug('Using configuration: %s', configuration)
     return configuration
