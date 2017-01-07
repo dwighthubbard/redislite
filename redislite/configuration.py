@@ -87,6 +87,7 @@ def settings(**kwargs):
     if sys.platform in ['win32']:
         # Remove settings that are missing on Windows
         del new_settings['unixsocketperm']
+        del new_settings['daemonize']
     new_settings.update(kwargs)
 
     return new_settings

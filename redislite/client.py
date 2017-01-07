@@ -175,7 +175,11 @@ class RedisMixin(object):
             redis_executable = 'redis-server'
         command = [redis_executable, self.redis_configuration_filename]
         logger.debug('Running: %s', ' '.join(command))
-        rc = subprocess.call(command)
+        if sys.platform in ['win32']:
+            subprocess.Popen(command, creationflags=8, close_fds=True)
+            rc = 0
+        else:
+            rc = subprocess.call(command)
         if rc:  # pragma: no cover
             logger.debug('The binary redis-server failed to start')
             redis_log = os.path.join(self.redis_dir, 'redis.log')
@@ -192,6 +196,10 @@ class RedisMixin(object):
                 break
             time.sleep(.1)
         if timeout:  # pragma: no cover
+            redis_log = os.path.join(self.redis_dir, 'redis.log')
+            if os.path.exists(redis_log):
+                with open(redis_log) as file_handle:
+                    logger.debug(file_handle.read())
             raise RedisLiteServerStartError(
                 'The redis-server process failed to start'
             )
