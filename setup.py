@@ -292,6 +292,7 @@ def get_and_update_metadata():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
     if sys.platform in ['win32'] and os.path.exists(WINDOWS_REDIS_SERVER):
         LOG.debug(
             'Using binary redis server at %s' % WINDOWS_REDIS_SERVER
