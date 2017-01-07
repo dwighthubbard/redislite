@@ -93,7 +93,7 @@ def add_redis_metadata(server_filename, metadata_filename):
         metadata['redis_bin'] = server_filename
 
     # Store the redis-server --version output for later
-    for line in os.popen('%s --version' % metadata['redis_bin']).readlines():
+    for line in os.popen('"%s" --version' % metadata['redis_bin']).readlines():
         line = line.strip()
         for item in line.split():
             if '=' in item:
